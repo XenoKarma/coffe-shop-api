@@ -18,7 +18,7 @@ return new class extends Migration
             $table->decimal('amount', 12, 2);
             $table->decimal('received_amount', 12, 2);
             $table->decimal('change_amount', 12, 2);
-            $table->timestamps('paid_at');
+            $table->timestamp('paid_at')->nullable();
             $table->timestamps();
         });
     }
