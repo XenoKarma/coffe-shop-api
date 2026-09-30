@@ -14,3 +14,5 @@ Route::middleware('auth:sacntum')->get('/me', function (Request $request) {
         'user' => $request->user(),
     ]);
 });
+
+Route::middleware('auth-sanctum')->post('/logout', [AuthController::class, 'logout']);
