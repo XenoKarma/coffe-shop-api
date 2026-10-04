@@ -1,5 +1,8 @@
 <?php
 
+use App\Models\Category;
+use App\Models\Order;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -15,7 +18,7 @@ use Tests\TestCase;
 */
 
 pest()->extend(TestCase::class)
- // ->use(RefreshDatabase::class)
+    ->use(RefreshDatabase::class)
     ->in('Feature');
 
 /*
@@ -44,7 +47,33 @@ expect()->extend('toBeOne', function () {
 |
 */
 
-function something()
+function adminToken(): string
 {
-    // ..
+    return User::factory()->admin()->create()->createToken('test')->plainTextToken;
+}
+
+function cashierToken(): string
+{
+    return User::factory()->cashier()->create()->createToken('test')->plainTextToken;
+}
+
+function productPayload(array $overrides = []): array
+{
+    return array_merge([
+        'category_id' => Category::factory()->create()->id,
+        'name' => 'Cafe Latte',
+        'sku' => 'COF-LAT',
+        'description' => 'Espresso with steamed milk',
+        'price' => 22000,
+        'is_active' => true,
+    ], $overrides);
+}
+
+function pendingOrder(int $total = 54000): Order
+{
+    return Order::factory()->create([
+        'status' => 'pending',
+        'subtotal' => $total,
+        'total' => $total,
+    ]);
 }
