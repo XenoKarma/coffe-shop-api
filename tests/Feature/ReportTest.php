@@ -79,6 +79,19 @@ test('total counts every paid order regardless of date', function () {
         ->assertJsonPath('data.total.orders', 2);
 });
 
+test('cancelled orders are ignored in the sales report', function () {
+    Order::factory()->create(['status' => 'cancelled', 'total' => 99000]);
+    Order::factory()->create(['status' => 'paid', 'total' => 54000]);
+
+    $this->withToken(adminToken())
+        ->getJson('/api/reports/sales')
+        ->assertOk()
+        ->assertJsonPath('data.today.sales', 54000)
+        ->assertJsonPath('data.today.orders', 1)
+        ->assertJsonPath('data.total.sales', 54000)
+        ->assertJsonPath('data.total.orders', 1);
+});
+
 test('best sellers are ranked by quantity across paid orders only', function () {
     $latteOrder = Order::factory()->create(['status' => 'paid']);
     OrderItem::factory()->create([

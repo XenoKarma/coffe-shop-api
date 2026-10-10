@@ -131,6 +131,8 @@ Delete conflict `409`: `{"message": "Cannot delete a product that has been order
 
 All order routes require `admin` or `cashier`.
 
+Order `status` lifecycle: `pending` → `paid` (after payment) or `pending` → `cancelled` (cashier voids before payment). Only `pending` orders can be edited or cancelled; `paid` and `cancelled` are final.
+
 ### POST /api/orders — 201
 
 Request:
@@ -163,11 +165,28 @@ Validation `422`: `items` required (min 1 entry), each `product_id` must exist, 
 
 ### GET /api/orders — 200 (paginated, newest first)
 
-Query parameters: `status` (`pending`|`paid`), `date=YYYY-MM-DD`, `cashier_id`, `page`.
+Query parameters: `status` (`pending`|`paid`|`cancelled`), `date=YYYY-MM-DD`, `cashier_id`, `page`.
 
 ### GET /api/orders/{id} — 200
 
-Full order with `cashier`, `items`, `payment` (or `payment: null` when still pending).
+Full order with `cashier`, `items`, `payment` (or `payment: null` when still pending or cancelled).
+
+### PUT /api/orders/{id} — 200
+
+Replaces the item list of a **pending** order (correction before payment). Same request shape and validation as `POST /api/orders`. Totals and per-item snapshots are recomputed from current database prices in one transaction (old items are deleted and rebuilt); `order_number`, `created_at`, and cashier are unchanged. No new order is created.
+
+Errors: `409` if the order is not `pending` (`Order is not pending.`), `422` same rules as create (`items`, duplicates, inactive/unknown product). On failure the original items and totals remain intact (transaction rollback).
+
+### PATCH /api/orders/{id}/cancel — 200
+
+Voids a **pending** order (set `status` to `cancelled`). Response `data` is the full order.
+
+Errors `409`:
+
+- already cancelled → `{"message": "Order is already cancelled."}`
+- paid → `{"message": "Paid orders cannot be cancelled."}`
+
+Cancelled orders stay in the list (`?status=cancelled`) and are excluded from sales reports.
 
 ### PATCH /api/orders/{id}/pay — 200
 
@@ -204,7 +223,7 @@ Aggregates **only paid orders** (gross sales, not profit).
 }
 ```
 
-`best_sellers`: top 5 by quantity sold (paid orders), `product_name` is the historical snapshot from order items. `today`/`month` are based on `Asia/Jakarta` calendar time.
+`best_sellers`: top 5 by quantity sold (paid orders), `product_name` is the historical snapshot from order items. `today`/`month` are based on `Asia/Jakarta` calendar time. `pending` and `cancelled` orders are never counted.
 
 ---
 
@@ -216,7 +235,8 @@ Aggregates **only paid orders** (gross sales, not profit).
 | GET categories, GET products | ✓ | ✓ | ✓ |
 | Category write | 401 | 403 | ✓ |
 | Product write | 401 | 403 | ✓ |
-| Orders create/list/detail/pay | 401 | ✓ | ✓ |
+| Orders create/list/detail | 401 | ✓ | ✓ |
+| Orders update/cancel/pay | 401 | ✓ | ✓ |
 | GET /api/reports/sales | 401 | 403 | ✓ |
 
 Every `403` body is exactly `{"message": "Forbidden."}`.

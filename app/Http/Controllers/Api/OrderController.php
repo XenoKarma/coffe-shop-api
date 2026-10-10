@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\PayOrderRequest;
 use App\Http\Requests\StoreOrderRequest;
+use App\Http\Requests\UpdateOrderRequest;
 use App\Http\Resources\OrderResource;
 use App\Models\Order;
 use App\Models\Product;
@@ -84,33 +85,10 @@ class OrderController extends Controller
     public function store(StoreOrderRequest $request): JsonResponse
     {
         $items = $request->validated('items');
-
-        $this->ensureNoDuplicateProducts($items);
-
-        $products = Product::whereIn('id', array_column($items, 'product_id'))
-            ->get()
-            ->keyBy('id');
-
-        $this->ensureProductsAreAvailable($items, $products);
+        $products = $this->productsForItems($items);
 
         $order = DB::transaction(function () use ($request, $items, $products) {
-            $subtotal = 0;
-            $orderItems = [];
-
-            foreach ($items as $item) {
-                $product = $products[$item['product_id']];
-                $lineSubtotal = round($product->price * $item['quantity'], 2);
-
-                $subtotal += $lineSubtotal;
-
-                $orderItems[] = [
-                    'product_id' => $product->id,
-                    'product_name' => $product->name,
-                    'price' => $product->price,
-                    'quantity' => $item['quantity'],
-                    'subtotal' => $lineSubtotal,
-                ];
-            }
+            ['subtotal' => $subtotal, 'items' => $orderItems] = $this->buildOrderItems($items, $products);
 
             $order = Order::create([
                 'order_number' => $this->generateOrderNumber(),
@@ -130,6 +108,90 @@ class OrderController extends Controller
         return (new OrderResource($order->load('cashier', 'items', 'payment')))
             ->response()
             ->setStatusCode(Response::HTTP_CREATED);
+    }
+
+    public function update(UpdateOrderRequest $request, Order $order): OrderResource
+    {
+        if ($order->status !== 'pending') {
+            abort(Response::HTTP_CONFLICT, 'Order is not pending.');
+        }
+
+        $items = $request->validated('items');
+        $products = $this->productsForItems($items);
+
+        DB::transaction(function () use ($order, $items, $products) {
+            ['subtotal' => $subtotal, 'items' => $orderItems] = $this->buildOrderItems($items, $products);
+
+            $order->update([
+                'subtotal' => $subtotal,
+                'total' => $subtotal,
+            ]);
+
+            $order->items()->delete();
+            $order->items()->createMany($orderItems);
+        });
+
+        return new OrderResource($order->load('cashier', 'items', 'payment'));
+    }
+
+    public function cancel(Order $order): OrderResource
+    {
+        if ($order->status === 'cancelled') {
+            abort(Response::HTTP_CONFLICT, 'Order is already cancelled.');
+        }
+
+        if ($order->status !== 'pending') {
+            abort(Response::HTTP_CONFLICT, 'Paid orders cannot be cancelled.');
+        }
+
+        $order->update(['status' => 'cancelled']);
+
+        return new OrderResource($order->load('cashier', 'items', 'payment'));
+    }
+
+    /**
+     * @param  array<int, array{product_id: int, quantity: int}>  $items
+     * @return Collection<int, Product>
+     */
+    private function productsForItems(array $items): Collection
+    {
+        $this->ensureNoDuplicateProducts($items);
+
+        $products = Product::whereIn('id', array_column($items, 'product_id'))
+            ->get()
+            ->keyBy('id');
+
+        $this->ensureProductsAreAvailable($items, $products);
+
+        return $products;
+    }
+
+    /**
+     * @param  array<int, array{product_id: int, quantity: int}>  $items
+     * @param  Collection<int, Product>  $products
+     * @return array{subtotal: float, items: array<int, array{product_id: int, product_name: string, price: float, quantity: int, subtotal: float}>}
+     */
+    private function buildOrderItems(array $items, Collection $products): array
+    {
+        $subtotal = 0;
+        $orderItems = [];
+
+        foreach ($items as $item) {
+            $product = $products[$item['product_id']];
+            $lineSubtotal = round($product->price * $item['quantity'], 2);
+
+            $subtotal += $lineSubtotal;
+
+            $orderItems[] = [
+                'product_id' => $product->id,
+                'product_name' => $product->name,
+                'price' => $product->price,
+                'quantity' => $item['quantity'],
+                'subtotal' => $lineSubtotal,
+            ];
+        }
+
+        return ['subtotal' => $subtotal, 'items' => $orderItems];
     }
 
     /**

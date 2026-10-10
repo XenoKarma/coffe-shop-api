@@ -360,3 +360,226 @@ test('admin can view an order detail', function () {
         ->assertJsonPath('data.id', $order->id)
         ->assertJsonPath('data.status', 'pending');
 });
+
+test('guest cannot cancel an order', function () {
+    $order = pendingOrder();
+
+    $this->patchJson("/api/orders/{$order->id}/cancel")->assertUnauthorized();
+});
+
+test('guest cannot update an order', function () {
+    $order = pendingOrder();
+    $product = Product::factory()->create();
+
+    $this->putJson("/api/orders/{$order->id}", [
+        'items' => [['product_id' => $product->id, 'quantity' => 1]],
+    ])->assertUnauthorized();
+});
+
+test('cashier can cancel a pending order', function () {
+    $order = pendingOrder();
+
+    $this->withToken(cashierToken())
+        ->patchJson("/api/orders/{$order->id}/cancel")
+        ->assertOk()
+        ->assertJsonPath('data.status', 'cancelled')
+        ->assertJsonPath('data.id', $order->id);
+
+    $this->assertDatabaseHas('orders', ['id' => $order->id, 'status' => 'cancelled']);
+});
+
+test('admin can cancel a pending order', function () {
+    $order = pendingOrder();
+
+    $this->withToken(adminToken())
+        ->patchJson("/api/orders/{$order->id}/cancel")
+        ->assertOk()
+        ->assertJsonPath('data.status', 'cancelled');
+});
+
+test('a paid order cannot be cancelled', function () {
+    $order = Order::factory()->create(['status' => 'paid']);
+
+    $this->withToken(cashierToken())
+        ->patchJson("/api/orders/{$order->id}/cancel")
+        ->assertConflict()
+        ->assertJson(['message' => 'Paid orders cannot be cancelled.']);
+
+    $this->assertDatabaseHas('orders', ['id' => $order->id, 'status' => 'paid']);
+});
+
+test('an order cannot be cancelled twice', function () {
+    $order = Order::factory()->create(['status' => 'cancelled']);
+
+    $this->withToken(cashierToken())
+        ->patchJson("/api/orders/{$order->id}/cancel")
+        ->assertConflict()
+        ->assertJson(['message' => 'Order is already cancelled.']);
+});
+
+test('order list can be filtered by cancelled status', function () {
+    $cancelled = Order::factory()->create(['status' => 'cancelled']);
+    Order::factory()->create(['status' => 'pending']);
+
+    $this->withToken(cashierToken())
+        ->getJson('/api/orders?status=cancelled')
+        ->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('data.0.id', $cancelled->id);
+});
+
+test('cashier can update a pending order', function () {
+    $americano = Product::factory()->create(['name' => 'Americano', 'price' => 18000]);
+    $fries = Product::factory()->create(['name' => 'French Fries', 'price' => 22000]);
+
+    $created = $this->withToken(cashierToken())
+        ->postJson('/api/orders', [
+            'items' => [['product_id' => $americano->id, 'quantity' => 1]],
+        ])
+        ->assertCreated();
+
+    $orderId = $created->json('data.id');
+    $orderNumber = $created->json('data.order_number');
+
+    $updated = $this->withToken(cashierToken())
+        ->putJson("/api/orders/{$orderId}", [
+            'items' => [['product_id' => $fries->id, 'quantity' => 3]],
+        ])
+        ->assertOk()
+        ->assertJsonPath('data.status', 'pending')
+        ->assertJsonPath('data.total', 66000)
+        ->assertJsonCount(1, 'data.items')
+        ->assertJsonPath('data.items.0.product_name', 'French Fries')
+        ->assertJsonPath('data.items.0.quantity', 3);
+
+    expect($updated->json('data.order_number'))->toBe($orderNumber);
+
+    $this->assertDatabaseCount('orders', 1);
+    $this->assertDatabaseHas('orders', ['id' => $orderId, 'subtotal' => 66000, 'total' => 66000]);
+    $this->assertDatabaseCount('order_items', 1);
+    $this->assertDatabaseHas('order_items', [
+        'order_id' => $orderId,
+        'product_id' => $fries->id,
+        'quantity' => 3,
+        'subtotal' => 66000,
+    ]);
+});
+
+test('update recalculates totals from current database prices', function () {
+    $product = Product::factory()->create(['price' => 18000]);
+    $order = pendingOrder(18000);
+
+    $product->update(['price' => 50000]);
+
+    $this->withToken(cashierToken())
+        ->putJson("/api/orders/{$order->id}", [
+            'items' => [['product_id' => $product->id, 'quantity' => 2]],
+        ])
+        ->assertOk()
+        ->assertJsonPath('data.total', 100000)
+        ->assertJsonPath('data.items.0.price', 50000);
+});
+
+test('a paid order cannot be updated', function () {
+    $order = Order::factory()->create(['status' => 'paid']);
+    $product = Product::factory()->create();
+
+    $this->withToken(cashierToken())
+        ->putJson("/api/orders/{$order->id}", [
+            'items' => [['product_id' => $product->id, 'quantity' => 1]],
+        ])
+        ->assertConflict()
+        ->assertJson(['message' => 'Order is not pending.']);
+});
+
+test('a cancelled order cannot be updated', function () {
+    $order = Order::factory()->create(['status' => 'cancelled']);
+    $product = Product::factory()->create();
+
+    $this->withToken(cashierToken())
+        ->putJson("/api/orders/{$order->id}", [
+            'items' => [['product_id' => $product->id, 'quantity' => 1]],
+        ])
+        ->assertConflict()
+        ->assertJson(['message' => 'Order is not pending.']);
+});
+
+test('update rejects duplicate products', function () {
+    $order = pendingOrder();
+    $product = Product::factory()->create();
+
+    $this->withToken(cashierToken())
+        ->putJson("/api/orders/{$order->id}", [
+            'items' => [
+                ['product_id' => $product->id, 'quantity' => 1],
+                ['product_id' => $product->id, 'quantity' => 2],
+            ],
+        ])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['items']);
+});
+
+test('update rejects an inactive product', function () {
+    $order = pendingOrder();
+    $inactive = Product::factory()->create(['is_active' => false]);
+
+    $this->withToken(cashierToken())
+        ->putJson("/api/orders/{$order->id}", [
+            'items' => [['product_id' => $inactive->id, 'quantity' => 1]],
+        ])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['items.0.product_id']);
+});
+
+test('update rejects an unknown product', function () {
+    $order = pendingOrder();
+
+    $this->withToken(cashierToken())
+        ->putJson("/api/orders/{$order->id}", [
+            'items' => [['product_id' => 99999, 'quantity' => 1]],
+        ])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['items.0.product_id']);
+});
+
+test('update requires at least one item', function () {
+    $order = pendingOrder();
+
+    $this->withToken(cashierToken())
+        ->putJson("/api/orders/{$order->id}", ['items' => []])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors(['items']);
+});
+
+test('order update rolls back when saving items fails', function () {
+    $product = Product::factory()->create(['price' => 18000]);
+    $order = pendingOrder(18000);
+
+    OrderItem::factory()->create([
+        'order_id' => $order->id,
+        'product_id' => $product->id,
+        'product_name' => 'Americano',
+        'price' => 18000,
+        'quantity' => 1,
+        'subtotal' => 18000,
+    ]);
+
+    $listener = function () {
+        throw new RuntimeException('Simulated failure while saving order items.');
+    };
+
+    OrderItem::creating($listener);
+
+    try {
+        $this->withToken(cashierToken())
+            ->putJson("/api/orders/{$order->id}", [
+                'items' => [['product_id' => $product->id, 'quantity' => 3]],
+            ])
+            ->assertStatus(500);
+    } finally {
+        OrderItem::getEventDispatcher()->forget('eloquent.creating: '.OrderItem::class);
+    }
+
+    $this->assertDatabaseHas('orders', ['id' => $order->id, 'subtotal' => 18000, 'total' => 18000]);
+    $this->assertDatabaseCount('order_items', 1);
+});
